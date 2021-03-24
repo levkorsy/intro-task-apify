@@ -3,127 +3,103 @@ const Apify = require('apify');
 
 Apify.main(async () => {
 
-    const input = await Apify.getInput();
-    const url = input.url + input.keyword;
+        const input = await Apify.getInput();
+        const url = input.url + input.keyword;
 
-    const requestQueue = await Apify.openRequestQueue();
-    await requestQueue.addRequest({ url });
-    // await requestQueue.addRequest({ url:'https://www.amazon.com/gp/offer-listing/B08N387GNG' });
+        const requestQueue = await Apify.openRequestQueue();
+        await requestQueue.addRequest({url});
+        const proxyConfiguration = await Apify.createProxyConfiguration();
 
-    const proxyConfiguration = await Apify.createProxyConfiguration();
+        // Function saves items in dataset. Gets request object and page object
+        const saveData = async (request, page) => {
+            //Getting data of pinned offer
+            const pinnedOffer = await page.evaluate(() => ({
+                price: document.querySelector('#aod-pinned-offer .a-offscreen').innerText,
+                shippingPrice: document.querySelector('#aod-pinned-offer #pinned-de-id div.a-row span.a-size-base span.a-color-secondary').innerText,
+                sellerName: document.querySelector('#aod-offer-soldBy span.a-size-small.a-color-base').innerText,
+            }));
+            // Merging previous result object and current
+            let resultPinned = {...request.userData.result, ...pinnedOffer};
+            // Merging previous result object and current
+            await Apify.pushData(resultPinned);
 
-    const saveData = async (request, page) => {
-        const pinnedOffer = await page.evaluate(() => ({
-            price: document.querySelector('#aod-pinned-offer .a-offscreen').innerText,
-            shipping: document.querySelector('#aod-pinned-offer #pinned-de-id div.a-row span.a-size-base span.a-color-secondary').innerText,
-            soldBy: document.querySelector('#aod-offer-soldBy span.a-size-small.a-color-base').innerText,
-        }));
-        let resultPinned = {...request.userData.result, ...pinnedOffer};
-        console.log(resultPinned, 'pushing data')
-        await Apify.pushData(resultPinned);
+            // Getting all offers from offers list
+            const offers = await page.$$('#aod-offer-list #aod-offer');
 
-        const offers = await page.$$('#aod-offer-list #aod-offer');
-        for (const el of offers) {
-            let  offerPriceElement  =  await el.$('#aod-offer-price .a-offscreen');
-            let  offerPrice = await page.evaluate(el => el.innerText, offerPriceElement);
-            let  offerSoldByElement  =  await el.$('#aod-offer-soldBy a.a-size-small.a-link-normal');
-            let  offerSoldBy = await page.evaluate(el => el.innerText, offerSoldByElement);
-            let  offerShippingPriceElement  =  await el.$('#aod-offer-price span.a-color-secondary');
-            let  offerShippingPrice = await page.evaluate(el => el.innerText, offerShippingPriceElement);
-            let  offerShippingPriceTest = await page.evaluate(el => el.textContent, offerShippingPriceElement);
-            let offer = {
-                price: offerPrice,
-                shipping: offerShippingPrice,
-                soldBy: offerSoldBy,
-                test:offerShippingPriceTest
+            // Loop through offers. Getting relevant data for every offer
+            for (const el of offers) {
+                let offerPriceElement = await el.$('#aod-offer-price .a-offscreen');
+                let offerPrice = await page.evaluate(el => el.innerText, offerPriceElement);
+
+                let offerSoldByElement = await el.$('#aod-offer-soldBy a.a-size-small.a-link-normal');
+                let offerSoldBy = await page.evaluate(el => el.innerText, offerSoldByElement);
+
+                let offerShippingPriceElement = await el.$('#aod-offer-price span.a-color-secondary');
+                let offerShippingPrice = await page.evaluate(el => el.innerText, offerShippingPriceElement);
+
+                let offer = {
+                    price: offerPrice,
+                    shippingPrice: offerShippingPrice,
+                    sellerName: offerSoldBy,
+                }
+                // Merging previous result object and current
+                let resultOfferListItem = {...request.userData.result, ...offer};
+                // Merging previous result object and current
+                await Apify.pushData(resultOfferListItem);
             }
-            let resultOfferListItem = {...request.userData.result, ...offer};
-            console.log(resultOfferListItem, 'pushing data')
+        }
 
-            await Apify.pushData(resultOfferListItem);
-            // let  offerShippingPriceElement  =  await el.$('#aod-offer-price span.a-color-secondary');
-            // let  offerShippingPrice = await page.evaluate(el => el.innerText, offerShippingPriceElement);
+        const handlePageFunction = async ({request, page}) => {
+            //Checking first request
+            if (!request.userData.label) {
+                //Getting array of "asin"(string)
+                const asinsArr = await page.$$eval("div.s-asin", el => el.map(x => x.getAttribute("data-asin")));
+                //Loop through array and adding requests to queque
+                for (const asin of asinsArr) {
+                    //Check if there is an asin
+                    if (asin.length > 0) {
+                        await requestQueue.addRequest({
+                            url: input.singleItem + asin,
+                            userData: {
+                                label: 'item-page',
+                                asin
+                            }
+                        });
+                    }
+                }
+            } else if (request.userData.label === 'item-page') {
+                await page.waitForSelector("head > meta[name='description']");
+                //Crawling data from page
+                const result = {
+                    url: request.url,
+                    keyword: input.keyword,
+                    title: await page.title(),
+                    description: await page.$eval("head > meta[name='description']", element => element.content),
+
+                }
+                // Adding requests to queque
+                await requestQueue.addRequest({
+                    url: input.offersUrl + request.userData.asin,
+                    userData: {
+                        label: 'offers-page',
+                        asin: request.userData.asin,
+                        result,
+                    }
+                });
+            } else if (request.userData.label === "offers-page") {
+                // Function for saving offers
+                await saveData(request, page);
             }
-        // await Apify.pushData(request.userData.result);
+        };
 
+        const crawler = new Apify.PuppeteerCrawler({
+            requestQueue,
+            proxyConfiguration,
+            handlePageFunction
+        });
+
+        console.log('Running Puppeteer script...');
+        await crawler.run();
+        console.log('Puppeteer closed.');
     }
-
-    const handlePageFunction= async ({ request, page }) => {
-        //Checking first request
-        if (!request.userData.label) {
-            //Getting array of "asin"(string)
-            const asinsArr = await page.$$eval("div.s-asin", el => el.map(x => x.getAttribute("data-asin")));
-            //Loop through array and adding requests to queque
-            for (const asin of asinsArr) {
-                //Check if there is an asin
-                if (asin.length > 0) {
-                    await requestQueue.addRequest({
-                        url: input.singleItem + asin,
-                        userData: {
-                            label: 'item-page',
-                            asin
-                        }
-                    });
-                }
-            }
-        }
-        else if (request.userData.label === 'item-page') {
-            await page.waitForSelector("head > meta[name='description']");
-            //Crawling data from page
-            const result = {
-                url: request.url,
-                keyword: input.keyword,
-                title: await page.title(),
-                description:  await page.$eval("head > meta[name='description']", element => element.content),
-
-            }
-            // Adding requests to queque
-            await requestQueue.addRequest({
-                url: input.offersUrl + request.userData.asin,
-                userData: {
-                    label: 'offers-page',
-                    asin: request.userData.asin,
-                    result,
-                }
-            });
-        }
-        else if (request.userData.label === "offers-page") {
-            // need to implement logic for getting all offers(seller, price etc.)
-            await saveData(request, page);
-        }
-    };
-    const handlePageFunction2 = async ({ request, page }) => {
-        // await page.waitForNavigation({ timeout: 600000 });
-        await page.waitForSelector('#aod-pinned-offer');
-        await page.waitForSelector('#aod-offer-list');
-        //
-        // const pinnedOffer = await page.$('#aod-pinned-offer');
-        // // const pinnedOffer = await page.$('#aod-offer-soldBy');
-        // if (pinnedOffer) {
-        //     var price = await pinnedOffer.$eval('.a-offscreen', element => element.textContent);
-        //
-        // }
-
-
-
-        // await this.page.evaluate((sel) => {
-        //     let elements = Array.from(document.querySelectorAll(sel));
-        //     let links = elements.map(element => {
-        //         return element.href
-        //     })
-        //     return links;
-        // }, sel);
-
-    };
-    const crawler = new Apify.PuppeteerCrawler({
-        // maxConcurrency: 2, // only for dev
-        // navigationTimeoutSecs: 800,
-        requestQueue,
-        proxyConfiguration,
-        handlePageFunction
-    });
-
-    console.log('Running Puppeteer script...');
-    await crawler.run();
-    console.log('Puppeteer closed.');
-});
+);
